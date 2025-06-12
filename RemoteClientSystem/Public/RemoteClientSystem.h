@@ -20,16 +20,22 @@ class REMOTECLIENTSYSTEM_API URemoteClientSystem : public UGameInstanceSubsystem
 	public:
 
 		UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Config")
-		int32 Port = 57573;
+		int32 Port = 54817;
 
 		UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Config")
 		FString IpAdr = "192.168.137.1";
 
 		UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Config")
-		FString mcuName = "Maroon";
+		FString mcuName = "smartMCU";
 
 		virtual void Initialize(FSubsystemCollectionBase& Collection) override;
 		virtual void Deinitialize() override;
+
+		UFUNCTION(BlueprintCallable, Category="Remote client system")
+		void ConnectToServer();
+
+		UFUNCTION(BlueprintCallable, Category="Remote client system")
+		void DisconnectFromServer();
 		
 		UFUNCTION(BlueprintCallable, Category="Remote client system")
 		void SelectMCU(FString MCU_Name);
@@ -38,7 +44,7 @@ class REMOTECLIENTSYSTEM_API URemoteClientSystem : public UGameInstanceSubsystem
 		void RetrieveMCUInfo();
 
 		UFUNCTION(BlueprintCallable, Category="Remote client system")
-		TArray<FServoInfo> GetCurrentServoPositions();		
+		TArray<FServoInfo> GetCurrentServoPositions();
 
 		TArray<uint8> _GetCurrentServoPositions();		
 
@@ -72,6 +78,7 @@ class REMOTECLIENTSYSTEM_API URemoteClientSystem : public UGameInstanceSubsystem
 		bool _is_ACK(const TArray<uint8>& query);
 		bool _is_NACK(const TArray<uint8>& query);
 		bool _is_iMCU(const TArray<uint8>& query);
+		void _CloseConnection();
 };
 
 DECLARE_LOG_CATEGORY_EXTERN(LogRemoteClientSystem, Log, All);

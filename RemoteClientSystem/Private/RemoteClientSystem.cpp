@@ -16,45 +16,114 @@ constexpr uint8 ID_SERVO_DATA_START = ID_SERVO_COUNT+2;
 void URemoteClientSystem::Initialize(FSubsystemCollectionBase& Collection){
     Super::Initialize(Collection);
 
-    status=ECLIStatusCode::STARTING_UP;
+    status=ECLIStatusCode::NO_SERVER_CONN;
+    err=true;                             
+    errCode=ECLIErrorCode::NoServerConnection;
+    ConnectToServer();
 
-    ISocketSubsystem* SocketSubsystem = ISocketSubsystem::Get(PLATFORM_SOCKETSUBSYSTEM);
-    TSharedPtr<FInternetAddr> srvAddr = SocketSubsystem->CreateInternetAddr();
-    bool bIsValid;
-    srvAddr->SetIp(*IpAdr, bIsValid);
-    srvAddr->SetPort(Port);    
+}
 
-    if (!bIsValid){
-        /* Invalid ip:port address */
-        UE_LOG(LogRemoteClientSystem, Fatal, TEXT("Invalid Server ip:port address"));
-        return;
+void URemoteClientSystem::ConnectToServer(){
+
+    {FScopeLock Lock(&MTX_statusCheck);
+        if(status.load()!=ECLIStatusCode::STARTING_UP&&status.load()!=ECLIStatusCode::NO_SERVER_CONN){
+            return;
+        }
     }
 
-    sck = SocketSubsystem->CreateSocket(NAME_Stream, TEXT("Server socket"), false);
-    sck->SetNonBlocking(false);
-    sck->SetReuseAddr(true);
+    UE::Tasks::Launch(TEXT("Connecting to Server"), [this](){
 
-    if(!sck->Connect(*srvAddr)){
-        /* Connection refused */
-        UE_LOG(LogRemoteClientSystem, Fatal, TEXT("Server connection refused"));
-        return;
+        ISocketSubsystem* SocketSubsystem = ISocketSubsystem::Get(PLATFORM_SOCKETSUBSYSTEM);
+        TSharedPtr<FInternetAddr> srvAddr = SocketSubsystem->CreateInternetAddr();
+        bool bIsValid;
+        srvAddr->SetIp(*IpAdr, bIsValid);
+        srvAddr->SetPort(Port);    
+
+        if (!bIsValid){
+            /* Invalid ip:port address */
+            UE_LOG(LogRemoteClientSystem, Error, TEXT("Invalid Server ip:port address"));
+            {FScopeLock Lock(&MTX_statusCheck);
+                status=ECLIStatusCode::NO_SERVER_CONN;
+            }
+            return;
+        }
+
+        sck = SocketSubsystem->CreateSocket(NAME_Stream, TEXT("Server socket"), false);
+        sck->SetNonBlocking(false);
+        sck->SetReuseAddr(true);
+
+        if(!sck->Connect(*srvAddr)){
+            /* Connection refused */
+            UE_LOG(LogRemoteClientSystem, Error, TEXT("Server connection refused"));
+            _CloseConnection();
+            {FScopeLock Lock(&MTX_statusCheck);
+                status=ECLIStatusCode::NO_SERVER_CONN;
+            }
+            return;
+        }
+        UE_LOG(LogRemoteClientSystem, Display, TEXT("Connected to Server"));
+
+
+        TArray<uint8> loginquery; const char* tLogin = "!s-Client_here-e!";
+        loginquery.Append((const uint8*)tLogin, strlen(tLogin));
+
+        int32 bySent=0;
+        if(!sck->Send(loginquery.GetData(),loginquery.Num(),bySent)){
+            /* Log in failed */
+            UE_LOG(LogRemoteClientSystem, Error, TEXT("Send Server log-in failed"));
+            _CloseConnection();
+            {FScopeLock Lock(&MTX_statusCheck);
+                status=ECLIStatusCode::NO_SERVER_CONN;
+            }
+            return;
+        }
+        UE_LOG(LogRemoteClientSystem, Display, TEXT("Logged in"));
+
+        {FScopeLock Lock(&MTX_statusCheck);
+            status=ECLIStatusCode::STARTING_UP;
+        }
+
+        err=false;
+        errCode=ECLIErrorCode::CLEAR;
+
+        SelectMCU(mcuName);
+
+    }, UE::Tasks::ETaskPriority::High);
+}
+
+void URemoteClientSystem::DisconnectFromServer(){
+
+    {FScopeLock Lock(&MTX_statusCheck);
+        if(status.load()==ECLIStatusCode::NO_SERVER_CONN){
+            return;
+        }
     }
-    UE_LOG(LogRemoteClientSystem, Display, TEXT("Connected to Server"));
 
+    UE::Tasks::Launch(TEXT("Server Disconnection"), [this](){
 
-    TArray<uint8> loginquery; const char* tLogin = "!s-Client_here-e!";
-    loginquery.Append((const uint8*)tLogin, strlen(tLogin));
+        {FScopeLock Lock(&MTX_statusCheck);
+            while(!err.load()&&status.load()!=ECLIStatusCode::IDLE){
+                continue;
+            }
 
-    int32 bySent=0;
-    if(!sck->Send(loginquery.GetData(),loginquery.Num(),bySent)){
-        /* Log in failed */
-        UE_LOG(LogRemoteClientSystem, Fatal, TEXT("Send Server log-in failed"));
-        return;
+            status=ECLIStatusCode::NO_SERVER_CONN;
+        }
+
+        _CloseConnection();
+
+    }, UE::Tasks::ETaskPriority::High);
+
+}
+
+void URemoteClientSystem::_CloseConnection(){
+    err=true;                             
+    errCode=ECLIErrorCode::NoServerConnection;
+    UE_LOG(LogRemoteClientSystem, Display, TEXT("Closing socket connection."));
+    if(sck){
+        sck->Close();
+        ISocketSubsystem::Get(PLATFORM_SOCKETSUBSYSTEM)->DestroySocket(sck);
+        sck = nullptr;
     }
-    UE_LOG(LogRemoteClientSystem, Display, TEXT("Logged in"));
-
-    SelectMCU(mcuName);
-
 }
 
 void URemoteClientSystem::SelectMCU(FString MCU_Name){
@@ -79,7 +148,7 @@ void URemoteClientSystem::SelectMCU(FString MCU_Name){
         if(!sck || !sck->Send(sMCU_Query.GetData(),sMCU_Query.Num(),bySent)){
             err=true;                            
             errCode=ECLIErrorCode::ServerConnError;
-            UE_LOG(LogRemoteClientSystem, Fatal, TEXT("Send sMCU query failed"));
+            UE_LOG(LogRemoteClientSystem, Error, TEXT("Send sMCU query failed"));
             return;
         }
         
@@ -110,7 +179,7 @@ void URemoteClientSystem::SelectMCU(FString MCU_Name){
         }else{
             err=true;
             errCode=ECLIErrorCode::ServerConnError;
-            UE_LOG(LogRemoteClientSystem, Fatal, TEXT("Server connection failed"));
+            UE_LOG(LogRemoteClientSystem, Error, TEXT("Server connection failed"));
             return;
         }
 
@@ -139,7 +208,7 @@ void URemoteClientSystem::RetrieveMCUInfo(){
         if(!sck || !sck->Send(iMCU_Query.GetData(),iMCU_Query.Num(),bySent)){
             err=true;                            
             errCode=ECLIErrorCode::ServerConnError;
-            UE_LOG(LogRemoteClientSystem, Fatal, TEXT("Send iMCU query failed"));
+            UE_LOG(LogRemoteClientSystem, Error, TEXT("Send iMCU query failed"));
             return;
         }
 
@@ -196,10 +265,11 @@ void URemoteClientSystem::RetrieveMCUInfo(){
         }else{
             err=true;
             errCode=ECLIErrorCode::ServerConnError;
-            UE_LOG(LogRemoteClientSystem, Fatal, TEXT("Server connection failed"));
+            UE_LOG(LogRemoteClientSystem, Error, TEXT("Server connection failed"));
             return;
         }
 
+        PENDING_MOVEMENT=false;
         pendingMovements.Empty();
         pendingMovements.AddZeroed(servoCount);
         status=ECLIStatusCode::IDLE; /* Return to idle status */
@@ -271,126 +341,136 @@ void URemoteClientSystem::SendMovement(TArray<FServoInfo> servoMovements){
         if(!err.load() && status.load()==ECLIStatusCode::IDLE){
             status=ECLIStatusCode::WAITING_SERVER_ACK;
             /* Create thread & send data */
-    
-            UE::Tasks::Launch(TEXT("Task_SendMovementOrder"), [this](){
-    
-                do{
-                   PENDING_MOVEMENT=false;
-                   status=ECLIStatusCode::WAITING_SERVER_ACK;
-                   TArray<uint8> mvToExecute;
+        }
         
-                    {FScopeLock Lock(&MTX_pendingMovements);
-                       mvToExecute = pendingMovements;
-                       pendingMovements.Empty();
-                       pendingMovements.AddZeroed(servoCount);
-                    }
-        
-                    /* Build query using the local mvToExecute copy */
-                    TArray<uint8> SRVP_Query; const char* tSRVP = "!s-SRVP-c-"; const char* tail = "e!";
-                    SRVP_Query.Append((const uint8*)tSRVP, strlen(tSRVP));
-                    uint8 count=0;
-                    for(auto i=0; i<mvToExecute.Num(); i++){
-                        if(mvToExecute[i]==0){continue;}
-                        SRVP_Query.Add(i+1); // Add servoId offset
-                        SRVP_Query.Add(':');SRVP_Query.Add(mvToExecute[i]);SRVP_Query.Add('-');
-                        count++;
-                    }
-                    SRVP_Query[ID_SERVO_COUNT]=count;
-                    SRVP_Query.Append((const uint8*)tail, strlen(tail));
+    }
 
-                    /* Send query to server */
-                    int32 bySent=0;
-                    if(!sck || !sck->Send(SRVP_Query.GetData(),SRVP_Query.Num(),bySent)){
+    UE::Tasks::Launch(TEXT("Task_SendMovementOrder"), [this](){
+
+        do{
+            PENDING_MOVEMENT=false;
+            status=ECLIStatusCode::WAITING_SERVER_ACK;
+            TArray<uint8> mvToExecute;
+
+            {FScopeLock Lock(&MTX_pendingMovements);
+                mvToExecute = pendingMovements;
+                pendingMovements.Empty();
+                pendingMovements.AddZeroed(servoCount);
+            }
+
+            /* Build query using the local mvToExecute copy */
+            TArray<uint8> SRVP_Query; const char* tSRVP = "!s-SRVP-c-"; const char* tail = "e!";
+            SRVP_Query.Append((const uint8*)tSRVP, strlen(tSRVP));
+            uint8 count=0;
+            for(auto i=0; i<mvToExecute.Num(); i++){
+                if(mvToExecute[i]==0){continue;}
+                SRVP_Query.Add(i+1); // Add servoId offset
+                SRVP_Query.Add(':');SRVP_Query.Add(mvToExecute[i]);SRVP_Query.Add('-');
+                count++;
+            }
+            SRVP_Query[ID_SERVO_COUNT]=count;
+            SRVP_Query.Append((const uint8*)tail, strlen(tail));
+
+            /* Send query to server */
+            int32 bySent=0;
+            if(!sck || !sck->Send(SRVP_Query.GetData(),SRVP_Query.Num(),bySent)){
+                err=true;                            
+                errCode=ECLIErrorCode::ServerConnError;
+                UE_LOG(LogRemoteClientSystem, Error, TEXT("Send SRVP query failed"));
+                return;
+            }
+
+            {/* Wait for first response (server confirmation) */
+                TArray<uint8> recvBuffer;
+                recvBuffer.SetNumUninitialized(256);
+                int32 byRead = 0;
+                if(sck->Recv(recvBuffer.GetData(), recvBuffer.Num(), byRead) && byRead > 0){
+                    recvBuffer.SetNum(byRead); // Trim excess buffer size
+
+                    if(_is_ACK(recvBuffer)){
+
+                        UE_LOG(LogRemoteClientSystem, Display, TEXT("Movement order Accepted by server"));
+
+                    }else if(_is_NACK(recvBuffer)){
+                        err=true;                             /*         8   */
+                        errCode=ECLIErrorCode(recvBuffer[8]); /* !s-NACK-x-e!*/
+                        status=ECLIStatusCode::IDLE;
+                        UE_LOG(LogRemoteClientSystem, Error, TEXT("SRVP Denied with error code: %d"), recvBuffer[8]);
+                        return;
+                    }else{
                         err=true;                            
                         errCode=ECLIErrorCode::ServerConnError;
-                        UE_LOG(LogRemoteClientSystem, Fatal, TEXT("Send SRVP query failed"));
+                        UE_LOG(LogRemoteClientSystem, Error, TEXT("Corrupt Server Response"));
                         return;
                     }
-        
-                    {/* Wait for first response (server confirmation) */
-                        TArray<uint8> recvBuffer;
-                        recvBuffer.SetNumUninitialized(256);
-                        int32 byRead = 0;
-                        if(sck->Recv(recvBuffer.GetData(), recvBuffer.Num(), byRead) && byRead > 0){
-                            recvBuffer.SetNum(byRead); // Trim excess buffer size
-    
-                            if(_is_ACK(recvBuffer)){
-    
-                                UE_LOG(LogRemoteClientSystem, Display, TEXT("Movement order Accepted by server"));
-    
-                            }else if(_is_NACK(recvBuffer)){
-                                err=true;                             /*         8   */
-                                errCode=ECLIErrorCode(recvBuffer[8]); /* !s-NACK-x-e!*/
-                                status=ECLIStatusCode::IDLE;
-                                UE_LOG(LogRemoteClientSystem, Error, TEXT("SRVP Denied with error code: %d"), recvBuffer[8]);
-                                return;
-                            }else{
-                                err=true;                            
-                                errCode=ECLIErrorCode::ServerConnError;
-                                UE_LOG(LogRemoteClientSystem, Error, TEXT("Corrupt Server Response"));
-                                return;
+                    
+                }else{
+                    err=true;
+                    errCode=ECLIErrorCode::ServerConnError;
+                    UE_LOG(LogRemoteClientSystem, Error, TEXT("Server connection failed"));
+                    return;
+                }
+            }
+            
+            status=ECLIStatusCode::WAITING_MCU_ACK;
+            {/* Wait for second response (relayed MCU confirmation) */
+                TArray<uint8> recvBuffer;
+                recvBuffer.SetNumUninitialized(256);
+                int32 byRead = 0;
+                if(sck->Recv(recvBuffer.GetData(), recvBuffer.Num(), byRead) && byRead > 0){
+                    recvBuffer.SetNum(byRead); // Trim excess buffer size
+
+                    if(_is_ACK(recvBuffer)){
+
+                        UE_LOG(LogRemoteClientSystem, Display, TEXT("Movement order completed by MCU"));
+
+                        {FScopeLock Lock(&MTX_currentPositions);
+                            for(auto i=0; i<mvToExecute.Num(); i++){
+                                if(mvToExecute[i]==0){continue;}
+                                /* Update current servo positions */
+                                currentServoPositions[i]=mvToExecute[i]; 
                             }
-                            
-                        }else{
-                            err=true;
-                            errCode=ECLIErrorCode::ServerConnError;
-                            UE_LOG(LogRemoteClientSystem, Fatal, TEXT("Server connection failed"));
-                            return;
                         }
+
+                    }else if(_is_NACK(recvBuffer)){
+                        err=true;                             /*         8   */
+                        errCode=ECLIErrorCode(recvBuffer[8]); /* !s-NACK-x-e!*/
+                        status=ECLIStatusCode::IDLE;
+                        UE_LOG(LogRemoteClientSystem, Error, TEXT("SRVP Denied by MCU with error code: %d"), recvBuffer[8]);
+                        return;
+                    }else{
+                        err=true;                            
+                        errCode=ECLIErrorCode::ServerConnError;
+                        UE_LOG(LogRemoteClientSystem, Error, TEXT("Corrupt Server Response"));
+                        return;
                     }
                     
-                    status=ECLIStatusCode::WAITING_MCU_ACK;
-                    {/* Wait for second response (relayed MCU confirmation) */
-                        TArray<uint8> recvBuffer;
-                        recvBuffer.SetNumUninitialized(256);
-                        int32 byRead = 0;
-                        if(sck->Recv(recvBuffer.GetData(), recvBuffer.Num(), byRead) && byRead > 0){
-                            recvBuffer.SetNum(byRead); // Trim excess buffer size
-    
-                            if(_is_ACK(recvBuffer)){
-    
-                                UE_LOG(LogRemoteClientSystem, Display, TEXT("Movement order completed by MCU"));
+                }else{
+                    err=true;
+                    errCode=ECLIErrorCode::ServerConnError;
+                    UE_LOG(LogRemoteClientSystem, Error, TEXT("Server connection failed"));
+                    return;
+                }
+            }                   
 
-                                {FScopeLock Lock(&MTX_currentPositions);
-                                    for(auto i=0; i<mvToExecute.Num(); i++){
-                                        if(mvToExecute[i]==0){continue;}
-                                        /* Update current servo positions */
-                                        currentServoPositions[i]=mvToExecute[i]; 
-                                    }
-                                }
-    
-                            }else if(_is_NACK(recvBuffer)){
-                                err=true;                             /*         8   */
-                                errCode=ECLIErrorCode(recvBuffer[8]); /* !s-NACK-x-e!*/
-                                status=ECLIStatusCode::IDLE;
-                                UE_LOG(LogRemoteClientSystem, Error, TEXT("SRVP Denied by MCU with error code: %d"), recvBuffer[8]);
-                                return;
-                            }else{
-                                err=true;                            
-                                errCode=ECLIErrorCode::ServerConnError;
-                                UE_LOG(LogRemoteClientSystem, Error, TEXT("Corrupt Server Response"));
-                                return;
-                            }
-                            
-                        }else{
-                            err=true;
-                            errCode=ECLIErrorCode::ServerConnError;
-                            UE_LOG(LogRemoteClientSystem, Fatal, TEXT("Server connection failed"));
-                            return;
-                        }
-                    }                   
+        }while(PENDING_MOVEMENT.load());
+
+        status=ECLIStatusCode::IDLE; /* Return to idle status */
+
+    }, UE::Tasks::ETaskPriority::High);
         
-                }while(PENDING_MOVEMENT.load());
-    
-                status=ECLIStatusCode::IDLE; /* Return to idle status */
-    
-            }, UE::Tasks::ETaskPriority::High);
-        }
-    }
+
     
 }
 
 void URemoteClientSystem::ClearErr(){
+
+    {FScopeLock Lock(&MTX_statusCheck);
+        if(status.load()==ECLIStatusCode::STARTING_UP||status.load()==ECLIStatusCode::NO_SERVER_CONN){
+            return;
+        }
+    }
+
     err=false;
     errCode=ECLIErrorCode::CLEAR;
     status=ECLIStatusCode::IDLE; 
@@ -445,12 +525,9 @@ bool URemoteClientSystem::_is_iMCU(const TArray<uint8>& query){
 }
 
 void URemoteClientSystem::Deinitialize(){
-    UE_LOG(LogRemoteClientSystem, Display, TEXT("Closing socket connection."));
-    if(sck){
-        sck->Close();
-        ISocketSubsystem::Get(PLATFORM_SOCKETSUBSYSTEM)->DestroySocket(sck);
-        sck = nullptr;
-    }
+
+    DisconnectFromServer();
+
 }
 
 IMPLEMENT_MODULE(FDefaultModuleImpl, RemoteClientSystem)

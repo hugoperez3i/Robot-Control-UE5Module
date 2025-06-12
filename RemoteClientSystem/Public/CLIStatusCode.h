@@ -11,11 +11,10 @@
 UENUM(BlueprintType)
 enum class ECLIStatusCode : uint8
 {
-	IDLE 						=0 UMETA(DisplayName = "Idle"),
-	ERRORED						=1 UMETA(DisplayName = "Idle"),
-
-	WAITING_SERVER_ACK			=1 UMETA(DisplayName = "Waiting for server confirmation"),
-	WAITING_MCU_ACK				=2 UMETA(DisplayName = "Waiting for movement completion"),
+	IDLE 						=0   UMETA(DisplayName = "Idle"),
+	WAITING_SERVER_ACK			=1   UMETA(DisplayName = "Waiting for server confirmation"),
+	WAITING_MCU_ACK				=2   UMETA(DisplayName = "Waiting for movement completion"),
+	NO_SERVER_CONN				=251 UMETA(DisplayName = "No server connection available"),
 	RETRIEVING_INFO				=252 UMETA(DisplayName = "Processing iMCU query"),
 	RETRIEVING_INFO_sMCU		=253 UMETA(DisplayName = "Processing iMCU query"),
 	ON_MCU_SELECT				=254 UMETA(DisplayName = "Processing sMCU query"),
