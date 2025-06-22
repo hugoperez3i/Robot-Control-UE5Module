@@ -26,7 +26,7 @@ class REMOTECLIENTSYSTEM_API URemoteClientSystem : public UGameInstanceSubsystem
 		FString IpAdr = "192.168.137.1";
 
 		UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Config")
-		FString mcuName = "smartMCU";
+		FString mcuName = "Maroon";
 
 		virtual void Initialize(FSubsystemCollectionBase& Collection) override;
 		virtual void Deinitialize() override;

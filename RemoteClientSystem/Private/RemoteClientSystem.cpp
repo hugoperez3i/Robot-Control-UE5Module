@@ -252,7 +252,7 @@ void URemoteClientSystem::RetrieveMCUInfo(){
                 err=true;                             /*         8   */
                 errCode=ECLIErrorCode(recvBuffer[8]); /* !s-NACK-x-e!*/
                 status=ECLIStatusCode::IDLE;
-                UE_LOG(LogRemoteClientSystem, Error, TEXT("sMCU Failed %d"), recvBuffer[8]);
+                UE_LOG(LogRemoteClientSystem, Error, TEXT("iMCU Failed %d"), recvBuffer[8]);
                 return;
             }else{
                 err=true;                            
