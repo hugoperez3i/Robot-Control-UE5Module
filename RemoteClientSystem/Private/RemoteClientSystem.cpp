@@ -17,7 +17,7 @@ void URemoteClientSystem::Initialize(FSubsystemCollectionBase& Collection){
     Super::Initialize(Collection);
 
     status=ECLIStatusCode::NO_SERVER_CONN;
-    err=true;                             
+    err=true; 
     errCode=ECLIErrorCode::NoServerConnection;
     ConnectToServer();
 
@@ -252,7 +252,7 @@ void URemoteClientSystem::RetrieveMCUInfo(){
                 err=true;                             /*         8   */
                 errCode=ECLIErrorCode(recvBuffer[8]); /* !s-NACK-x-e!*/
                 status=ECLIStatusCode::IDLE;
-                UE_LOG(LogRemoteClientSystem, Error, TEXT("iMCU Failed %d"), recvBuffer[8]);
+                UE_LOG(LogRemoteClientSystem, Error, TEXT("sMCU Failed %d"), recvBuffer[8]);
                 return;
             }else{
                 err=true;                            
@@ -341,125 +341,124 @@ void URemoteClientSystem::SendMovement(TArray<FServoInfo> servoMovements){
         if(!err.load() && status.load()==ECLIStatusCode::IDLE){
             status=ECLIStatusCode::WAITING_SERVER_ACK;
             /* Create thread & send data */
+            
+            UE::Tasks::Launch(TEXT("Task_SendMovementOrder"), [this](){
+
+                do{
+                    PENDING_MOVEMENT=false;
+                    status=ECLIStatusCode::WAITING_SERVER_ACK;
+                    TArray<uint8> mvToExecute;
+
+                    {FScopeLock Lock(&MTX_pendingMovements);
+                        mvToExecute = pendingMovements;
+                        pendingMovements.Empty();
+                        pendingMovements.AddZeroed(servoCount);
+                    }
+
+                    /* Build query using the local mvToExecute copy */
+                    TArray<uint8> SRVP_Query; const char* tSRVP = "!s-SRVP-c-"; const char* tail = "e!";
+                    SRVP_Query.Append((const uint8*)tSRVP, strlen(tSRVP));
+                    uint8 count=0;
+                    for(auto i=0; i<mvToExecute.Num(); i++){
+                        if(mvToExecute[i]==0){continue;}
+                        SRVP_Query.Add(i+1); // Add servoId offset
+                        SRVP_Query.Add(':');SRVP_Query.Add(mvToExecute[i]);SRVP_Query.Add('-');
+                        count++;
+                    }
+                    SRVP_Query[ID_SERVO_COUNT]=count;
+                    SRVP_Query.Append((const uint8*)tail, strlen(tail));
+
+                    /* Send query to server */
+                    int32 bySent=0;
+                    if(!sck || !sck->Send(SRVP_Query.GetData(),SRVP_Query.Num(),bySent)){
+                        err=true;                            
+                        errCode=ECLIErrorCode::ServerConnError;
+                        UE_LOG(LogRemoteClientSystem, Error, TEXT("Send SRVP query failed"));
+                        return;
+                    }
+
+                    {/* Wait for first response (server confirmation) */
+                        TArray<uint8> recvBuffer;
+                        recvBuffer.SetNumUninitialized(256);
+                        int32 byRead = 0;
+                        if(sck->Recv(recvBuffer.GetData(), recvBuffer.Num(), byRead) && byRead > 0){
+                            recvBuffer.SetNum(byRead); // Trim excess buffer size
+
+                            if(_is_ACK(recvBuffer)){
+
+                                UE_LOG(LogRemoteClientSystem, Display, TEXT("Movement order Accepted by server"));
+
+                            }else if(_is_NACK(recvBuffer)){
+                                err=true;                             /*         8   */
+                                errCode=ECLIErrorCode(recvBuffer[8]); /* !s-NACK-x-e!*/
+                                status=ECLIStatusCode::IDLE;
+                                UE_LOG(LogRemoteClientSystem, Error, TEXT("SRVP Denied with error code: %d"), recvBuffer[8]);
+                                return;
+                            }else{
+                                err=true;                            
+                                errCode=ECLIErrorCode::ServerConnError;
+                                UE_LOG(LogRemoteClientSystem, Error, TEXT("Corrupt Server Response"));
+                                return;
+                            }
+                            
+                        }else{
+                            err=true;
+                            errCode=ECLIErrorCode::ServerConnError;
+                            UE_LOG(LogRemoteClientSystem, Error, TEXT("Server connection failed"));
+                            return;
+                        }
+                    }
+                    
+                    status=ECLIStatusCode::WAITING_MCU_ACK;
+                    {/* Wait for second response (relayed MCU confirmation) */
+                        TArray<uint8> recvBuffer;
+                        recvBuffer.SetNumUninitialized(256);
+                        int32 byRead = 0;
+                        if(sck->Recv(recvBuffer.GetData(), recvBuffer.Num(), byRead) && byRead > 0){
+                            recvBuffer.SetNum(byRead); // Trim excess buffer size
+
+                            if(_is_ACK(recvBuffer)){
+
+                                UE_LOG(LogRemoteClientSystem, Display, TEXT("Movement order completed by MCU"));
+
+                                {FScopeLock Lock(&MTX_currentPositions);
+                                    for(auto i=0; i<mvToExecute.Num(); i++){
+                                        if(mvToExecute[i]==0){continue;}
+                                        /* Update current servo positions */
+                                        currentServoPositions[i]=mvToExecute[i]; 
+                                    }
+                                }
+
+                            }else if(_is_NACK(recvBuffer)){
+                                err=true;                             /*         8   */
+                                errCode=ECLIErrorCode(recvBuffer[8]); /* !s-NACK-x-e!*/
+                                status=ECLIStatusCode::IDLE;
+                                UE_LOG(LogRemoteClientSystem, Error, TEXT("SRVP Denied by MCU with error code: %d"), recvBuffer[8]);
+                                return;
+                            }else{
+                                err=true;                            
+                                errCode=ECLIErrorCode::ServerConnError;
+                                UE_LOG(LogRemoteClientSystem, Error, TEXT("Corrupt Server Response"));
+                                return;
+                            }
+                            
+                        }else{
+                            err=true;
+                            errCode=ECLIErrorCode::ServerConnError;
+                            UE_LOG(LogRemoteClientSystem, Error, TEXT("Server connection failed"));
+                            return;
+                        }
+                    }                   
+
+                }while(PENDING_MOVEMENT.load());
+
+                status=ECLIStatusCode::IDLE; /* Return to idle status */
+
+            }, UE::Tasks::ETaskPriority::High);
+
         }
         
     }
-
-    UE::Tasks::Launch(TEXT("Task_SendMovementOrder"), [this](){
-
-        do{
-            PENDING_MOVEMENT=false;
-            status=ECLIStatusCode::WAITING_SERVER_ACK;
-            TArray<uint8> mvToExecute;
-
-            {FScopeLock Lock(&MTX_pendingMovements);
-                mvToExecute = pendingMovements;
-                pendingMovements.Empty();
-                pendingMovements.AddZeroed(servoCount);
-            }
-
-            /* Build query using the local mvToExecute copy */
-            TArray<uint8> SRVP_Query; const char* tSRVP = "!s-SRVP-c-"; const char* tail = "e!";
-            SRVP_Query.Append((const uint8*)tSRVP, strlen(tSRVP));
-            uint8 count=0;
-            for(auto i=0; i<mvToExecute.Num(); i++){
-                if(mvToExecute[i]==0){continue;}
-                SRVP_Query.Add(i+1); // Add servoId offset
-                SRVP_Query.Add(':');SRVP_Query.Add(mvToExecute[i]);SRVP_Query.Add('-');
-                count++;
-            }
-            SRVP_Query[ID_SERVO_COUNT]=count;
-            SRVP_Query.Append((const uint8*)tail, strlen(tail));
-
-            /* Send query to server */
-            int32 bySent=0;
-            if(!sck || !sck->Send(SRVP_Query.GetData(),SRVP_Query.Num(),bySent)){
-                err=true;                            
-                errCode=ECLIErrorCode::ServerConnError;
-                UE_LOG(LogRemoteClientSystem, Error, TEXT("Send SRVP query failed"));
-                return;
-            }
-
-            {/* Wait for first response (server confirmation) */
-                TArray<uint8> recvBuffer;
-                recvBuffer.SetNumUninitialized(256);
-                int32 byRead = 0;
-                if(sck->Recv(recvBuffer.GetData(), recvBuffer.Num(), byRead) && byRead > 0){
-                    recvBuffer.SetNum(byRead); // Trim excess buffer size
-
-                    if(_is_ACK(recvBuffer)){
-
-                        UE_LOG(LogRemoteClientSystem, Display, TEXT("Movement order Accepted by server"));
-
-                    }else if(_is_NACK(recvBuffer)){
-                        err=true;                             /*         8   */
-                        errCode=ECLIErrorCode(recvBuffer[8]); /* !s-NACK-x-e!*/
-                        status=ECLIStatusCode::IDLE;
-                        UE_LOG(LogRemoteClientSystem, Error, TEXT("SRVP Denied with error code: %d"), recvBuffer[8]);
-                        return;
-                    }else{
-                        err=true;                            
-                        errCode=ECLIErrorCode::ServerConnError;
-                        UE_LOG(LogRemoteClientSystem, Error, TEXT("Corrupt Server Response"));
-                        return;
-                    }
-                    
-                }else{
-                    err=true;
-                    errCode=ECLIErrorCode::ServerConnError;
-                    UE_LOG(LogRemoteClientSystem, Error, TEXT("Server connection failed"));
-                    return;
-                }
-            }
-            
-            status=ECLIStatusCode::WAITING_MCU_ACK;
-            {/* Wait for second response (relayed MCU confirmation) */
-                TArray<uint8> recvBuffer;
-                recvBuffer.SetNumUninitialized(256);
-                int32 byRead = 0;
-                if(sck->Recv(recvBuffer.GetData(), recvBuffer.Num(), byRead) && byRead > 0){
-                    recvBuffer.SetNum(byRead); // Trim excess buffer size
-
-                    if(_is_ACK(recvBuffer)){
-
-                        UE_LOG(LogRemoteClientSystem, Display, TEXT("Movement order completed by MCU"));
-
-                        {FScopeLock Lock(&MTX_currentPositions);
-                            for(auto i=0; i<mvToExecute.Num(); i++){
-                                if(mvToExecute[i]==0){continue;}
-                                /* Update current servo positions */
-                                currentServoPositions[i]=mvToExecute[i]; 
-                            }
-                        }
-
-                    }else if(_is_NACK(recvBuffer)){
-                        err=true;                             /*         8   */
-                        errCode=ECLIErrorCode(recvBuffer[8]); /* !s-NACK-x-e!*/
-                        status=ECLIStatusCode::IDLE;
-                        UE_LOG(LogRemoteClientSystem, Error, TEXT("SRVP Denied by MCU with error code: %d"), recvBuffer[8]);
-                        return;
-                    }else{
-                        err=true;                            
-                        errCode=ECLIErrorCode::ServerConnError;
-                        UE_LOG(LogRemoteClientSystem, Error, TEXT("Corrupt Server Response"));
-                        return;
-                    }
-                    
-                }else{
-                    err=true;
-                    errCode=ECLIErrorCode::ServerConnError;
-                    UE_LOG(LogRemoteClientSystem, Error, TEXT("Server connection failed"));
-                    return;
-                }
-            }                   
-
-        }while(PENDING_MOVEMENT.load());
-
-        status=ECLIStatusCode::IDLE; /* Return to idle status */
-
-    }, UE::Tasks::ETaskPriority::High);
-        
-
     
 }
 
